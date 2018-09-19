@@ -1,17 +1,19 @@
 import json
 import logging
+from urllib import quote
 
+from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Q
 from django.shortcuts import render, get_object_or_404, HttpResponseRedirect, HttpResponse
 from django.template import TemplateDoesNotExist
-from django.core.exceptions import ObjectDoesNotExist
 
 from a_frame import settings
 from common.lib import aframe_utils
-
+from forms import ImportForm
 from input_forms.models import InputForm
 from models import Screen
-from models import ScreenWidgetData
 from models import ScreenWidgetConfig
+from models import ScreenWidgetData
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,8 @@ def index(request):
 def new(request):
     logger.info("__ screens new __")
     screens = Screen.objects.all().order_by("name")
-    themes = settings.REGISTERED_APP_THEMES
+    # themes = settings.REGISTERED_APP_THEMES
+    themes = aframe_utils.get_screen_themes()
     widgets = settings.SCREEN_WIDGETS
     context = {"screens": screens, "themes": themes, 'widgets': widgets}
     return render(request, "screens/new.html", context)
@@ -43,13 +46,23 @@ def delete(request, screen_id):
 def detail(request, screen_id):
     logger.info("__ screens detail __")
     screen = get_object_or_404(Screen, pk=screen_id)
-    input_forms_list = screen.input_forms.all().order_by("id")
+    # input_forms_list = screen.input_forms.all().order_by("id")
     input_form_ids = list()
     input_forms = dict()
 
-    for input_form in input_forms_list:
-        input_form_ids.append(input_form.id)
-        input_forms[input_form.id] = input_form.name
+    # for input_form in input_forms_list:
+    #    input_form_ids.append(input_form.id)
+    #    input_forms[input_form.id] = input_form.name
+
+    layout_obj = json.loads(screen.layout)
+    for inf in layout_obj.get('input_forms', []):
+        if InputForm.objects.filter(pk=inf).exists():
+            input_form = InputForm.objects.get(pk=inf)
+            input_form_ids.append(int(inf))
+            input_forms[inf] = input_form.name
+        else:
+            print('UNKNOWN INPUTFORM ID %s' % inf)
+            logger.warn("unknown input form id for %s" % inf)
 
     ifi_json = json.dumps(input_form_ids)
     input_forms_json = json.dumps(input_forms)
@@ -61,7 +74,8 @@ def detail(request, screen_id):
 
     wi_json = json.dumps(widget_ids)
 
-    themes = settings.REGISTERED_APP_THEMES
+    # themes = settings.REGISTERED_APP_THEMES
+    themes = aframe_utils.get_screen_themes()
     all_widgets = settings.SCREEN_WIDGETS
 
     # only load non-transient widgets
@@ -73,6 +87,14 @@ def detail(request, screen_id):
 
     available_widgets_json = json.dumps(available_widgets)
 
+    # Grab all the screens metadata. This allows a Theme to show a menu of all screens if desired
+    screens = Screen.objects.values('id', 'name', 'tag')
+    tags = list()
+    for s in screens:
+        t = s['tag']
+        if t not in tags:
+            tags.append(t)
+
     context = {'screen': screen,
                'input_forms_json': input_forms_json,
                'input_form_ids': ifi_json,
@@ -81,25 +103,30 @@ def detail(request, screen_id):
                'layout': screen.layout,
                'available_widgets': available_widgets,
                'available_widgets_json': available_widgets_json,
-               'themes': themes}
+               'themes': themes,
+               'tags': tags,
+               'screens': screens}
 
     return render(request, "screens/detail.html", context)
 
 
 def create(request):
     logger.info("__ screens create __")
-    required_fields = set(["name", "theme", "description", "input_forms"])
+    required_fields = set(["name", "theme", "description", "input_forms", "screen_widgets", "tag"])
     if not required_fields.issubset(request.POST):
         return render(request, "error.html", {"error": "Invalid Parameters in POST"})
 
     name = request.POST["name"]
     theme = request.POST["theme"]
+    tag = request.POST["tag"]
     description = request.POST["description"]
     input_forms = request.POST["input_forms"]
+    widgets = request.POST['screen_widgets']
 
     screen = Screen()
     screen.name = name
     screen.theme = theme
+    screen.tag = tag
     screen.description = description
     screen.save()
 
@@ -108,7 +135,10 @@ def create(request):
     else:
         input_forms_data = json.loads(input_forms)
 
-    print input_forms_data
+    if widgets == "":
+        widgets_data = []
+    else:
+        widgets_data = json.loads(widgets)
 
     layout = dict()
     layout['input_forms'] = dict()
@@ -131,19 +161,40 @@ def create(request):
 
         screen.input_forms.add(input_form)
 
+    indx = 0
+    for w in widgets_data:
+        widget_layout = dict()
+        widget_layout["x"] = xcounter
+        widget_layout["y"] = ycounter
+
+        layout['widgets'][indx] = dict()
+        layout['widgets'][indx]["layout"] = widget_layout
+        layout['widgets'][indx]["widget_id"] = w
+        layout['widgets'][indx]["widget_config"] = dict()
+        if xcounter <= 900:
+            xcounter += 360
+        else:
+            ycounter += 500
+            xcounter = 160
+
+        indx += 1
+
     screen.layout = json.dumps(layout)
     screen.save()
     screen_id = screen.id
     return HttpResponseRedirect("/screens/" + str(screen_id))
 
 
-def edit(request):
-    return HttpResponseRedirect("/screens")
+def edit(request, screen_id):
+    logger.info("__ screens edit __")
+    screen = get_object_or_404(Screen, pk=screen_id)
+    context = {'screen': screen}
+    return render(request, "screens/edit.html", context)
 
 
 def update(request):
     logger.info("__ screens update __")
-    required_fields = set(["screen_id", "screen_id", "name", "description", "json"])
+    required_fields = {"screen_id", "tag", "name", "description"}
     if not required_fields.issubset(request.POST):
         logger.error("Did no find all required fields in request")
         return render(request, "error.html", {"error": "Invalid Parameters in POST"})
@@ -151,17 +202,13 @@ def update(request):
     screen_id = request.POST["screen_id"]
     name = request.POST["name"]
     description = request.POST["description"]
-    json_data = request.POST["json"]
-    instructions = request.POST["instructions"]
+    tag = request.POST["tag"]
 
     screen = get_object_or_404(Screen, pk=screen_id)
 
-    screen.id = screen_id
     screen.name = name
     screen.description = description
-    screen.instructions = instructions
-    screen.json = json_data
-    screen.script = screen
+    screen.tag = tag
     screen.save()
     return HttpResponseRedirect("/screens")
 
@@ -176,8 +223,6 @@ def update_layout(request):
     screen_id = request.POST["screen_id"]
     layout = request.POST["layout"]
     theme = request.POST["theme"]
-
-    print layout
 
     screen = get_object_or_404(Screen, pk=screen_id)
     screen.layout = layout
@@ -195,13 +240,11 @@ def update_layout(request):
                 break
 
         if not found:
-            print "Removing: " + str(inf.id)
             input_form = InputForm.objects.get(pk=inf.id)
             screen.input_forms.remove(input_form)
 
     # now let's add any news ones that have been configured
     for input_form_id in layout_obj['input_forms'].keys():
-        print input_form_id
         found = False
         for inf in input_forms_list:
             if inf.id == input_form_id:
@@ -217,6 +260,65 @@ def update_layout(request):
     return render(request, "overlay_basic.html", {"message": "Layout Updated successfully!"})
 
 
+def export_screen(request, screen_id):
+    logger.info("__ screens export __")
+
+    screen = get_object_or_404(Screen, pk=screen_id)
+    layout = screen.layout
+    layout_obj = json.loads(layout)
+
+    exported_data = dict()
+    exported_data['input_forms'] = dict()
+    exported_data['widgets'] = dict()
+
+    for input_form_id in layout_obj['input_forms'].keys():
+        input_form_json = aframe_utils.export_input_form(input_form_id)
+        exported_data['input_forms'][input_form_id] = input_form_json
+
+    for widget_key in layout_obj['widgets']:
+        widget_id = layout_obj['widgets'][widget_key].get('widget_id', None)
+        if widget_id is None:
+            continue
+        if ScreenWidgetConfig.objects.filter(widget_type=widget_id).exists():
+            widget_config = ScreenWidgetConfig.objects.get(widget_type=widget_id)
+            # context.update
+            exported_data['widgets'][widget_id] = quote(widget_config.data)
+
+    exported_data['screen'] = dict()
+    exported_data['screen']['name'] = screen.name
+    exported_data['screen']['description'] = screen.description
+    exported_data['screen']['theme'] = screen.theme
+    exported_data['screen']['layout'] = screen.layout
+    exported_data['screen']['id'] = str(screen.id)
+    exported_data['screen']['tag'] = screen.tag
+
+    exported_json = json.dumps(exported_data)
+    response = HttpResponse(exported_json, content_type="application/json")
+    response['Content-Disposition'] = 'attachment; filename=' + 'aframe-' + str(screen.name) + '.json'
+
+    return response
+
+
+def import_screen(request):
+    logger.info("__ input_forms import_form __")
+    if request.method == "POST":
+        json_file = request.FILES['file']
+        json_string = json_file.read()
+        json_data = json.loads(json_string)
+
+        aframe_utils.import_screen(json_data)
+
+        if 'screen' in json_data and 'id' in json_data['screen']:
+            screen_id = json_data['screen']['id']
+            return HttpResponseRedirect("/screens/{}".format(screen_id))
+
+        return HttpResponseRedirect("/screens")
+    else:
+        form = ImportForm()
+        context = {'form': form}
+        return render(request, 'screens/import.html', context)
+
+
 def load_widget_config(request):
     """
     Load the configuration for a given screen widget
@@ -227,7 +329,7 @@ def load_widget_config(request):
     required_fields = set(["widget_id", "widget_layout_id"])
     if not required_fields.issubset(request.POST):
         logger.error("Did no find all required fields in request")
-        return render(request, "error.html", {"error": "Invalid Parameters in POST"})
+        return render(request, "overlay_basic.html", {"message": "Invalid Parameters in POST"})
 
     widget_id = request.POST["widget_id"]
     widget_layout_id = request.POST["widget_layout_id"]
@@ -239,7 +341,6 @@ def load_widget_config(request):
 
     found = False
     for w in widgets:
-
         if w["id"] == widget_id:
             widget_name = w["label"]
             widget_configuration_template = w["configuration_template"]
@@ -255,6 +356,13 @@ def load_widget_config(request):
                       {"error": "Could not find widget configuration"})
 
     context = {"widget_id": widget_id, "widget_name": widget_name, "widget_layout_id": widget_layout_id}
+
+    # grab the widget global configuration if it exists and set on the context
+    # FIXME - widget_type and widget_id are used interchangeably, this should just be widget_id basically everywhere
+    if ScreenWidgetConfig.objects.filter(widget_type=widget_id).exists():
+        widget_config = ScreenWidgetConfig.objects.get(widget_type=widget_id)
+        # context.update
+        context.update({"widget_global_config": widget_config.data})
 
     if widget_consumes_input_form != "":
         # this widget will consume the output of a configured automation!
@@ -339,10 +447,8 @@ def load_widget(request):
         # grab the widget global configuration if it exists and set on the context
         # FIXME - widget_type and widget_id are used interchangeably, this should just be widget_id basically everywhere
         if ScreenWidgetConfig.objects.filter(widget_type=widget_id).exists():
-            print "FOUND WIDGET CONFIG"
             widget_config = ScreenWidgetConfig.objects.get(widget_type=widget_id)
             # context.update
-            print widget_config.data
             context.update({"widget_global_config": widget_config.data})
 
         if "consumes_automation" in w:
@@ -362,6 +468,7 @@ def load_widget(request):
                 context.update({"automation_output": results_object})
             except ValueError:
                 print "Could not parse JSON output from automation!"
+                logger.warn('Could not parse JSON output from automation!')
                 pass
 
         return render(request, "screens/widgets/%s" % widget_template, context)
@@ -578,5 +685,25 @@ def delete_widget_config(request):
     else:
         results['status'] = True
         results['message'] = 'widget config already gone!'
+
+    return HttpResponse(json.dumps(results), content_type="application/json")
+
+
+def search(request):
+    """
+    used for UI autocomplete searches. Only used on the endpoint details page. 
+    :param request:
+    :return: dict containing label and value keys
+    """
+    logger.info("__ screens search __")
+
+    term = request.GET["term"]
+    screen_list = Screen.objects.filter(Q(name__contains=term) | Q(description__contains=term))
+    results = []
+    for screen in screen_list:
+        r = dict()
+        r["value"] = str(screen.id)
+        r["label"] = screen.name + " " + screen.description
+        results.append(r)
 
     return HttpResponse(json.dumps(results), content_type="application/json")

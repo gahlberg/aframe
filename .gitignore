@@ -1,3 +1,4 @@
+venv
 endpointList.txt
 db.sqlite3
 db.sqlite3.*
@@ -5,3 +6,9 @@ db.sqlite3.*
 .DS_Store
 .idea/.*
 .idea/
+conf/imports/themes/
+conf/imports/forms/
+conf/imports/screens/
+screens/templates/themes/test.html
+screens/templates/themes/pan.html
+.gitignore

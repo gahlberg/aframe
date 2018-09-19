@@ -193,7 +193,6 @@ def new_from_template(request, template_id):
             if variable_string not in available_tags:
                 if not variable_string.startswith("af_"):
                     available_tags.append(variable_string)
-
     widgets = settings.WIDGETS
     widgets_json = json.dumps(widgets)
     context = {
@@ -202,6 +201,31 @@ def new_from_template(request, template_id):
         "widgets": widgets,
         "widgets_json": widgets_json
     }
+
+    if 'cloned_templates' in request.session:
+        print 'found cloned templates'
+        cloned_templates = request.session['cloned_templates']
+        if template_id in cloned_templates:
+            print 'found this template_id'
+            if 'input_form_id' in cloned_templates[template_id]:
+                cloned_input_form_id = cloned_templates[template_id]['input_form_id']
+                try:
+                    input_form = InputForm.objects.get(pk=cloned_input_form_id)
+                    dolly = InputForm()
+                    dolly.name = config_template.name
+                    dolly.description = config_template.description
+                    dolly.instructions = input_form.instructions
+                    dolly.json = input_form.json
+                    dolly.script = config_template
+                    dolly.save()
+                    context['input_form'] = dolly
+                    return render(request, "input_forms/edit.html", context)
+                except ObjectDoesNotExist:
+                    print 'Could not find the input for for this cloned template'
+
+    else:
+        print 'no cloned templates found!'
+
     return render(request, "input_forms/new.html", context)
 
 
@@ -232,30 +256,35 @@ def create(request):
 def export_form(request, input_form_id):
     logger.info("__ input_forms export_form __")
     logger.info("exporting %s" % input_form_id)
+
+    exported_json = aframe_utils.export_input_form(input_form_id)
+
     input_form = InputForm.objects.get(pk=input_form_id)
     config_template = input_form.script
+    #
+    # template_options = dict()
+    # template_options["name"] = config_template.name
+    # template_options["description"] = config_template.description
+    # template_options["action_provider"] = config_template.action_provider
+    # template_options["action_provider_options"] = config_template.action_provider_options
+    # template_options["type"] = config_template.type
+    # template_options["template"] = quote(config_template.template)
+    #
+    # form_options = dict()
+    # form_options["name"] = input_form.name
+    # form_options["description"] = input_form.description
+    # form_options["instructions"] = input_form.instructions
+    # form_options["json"] = quote(input_form.json)
+    #
+    # exported_object = dict()
+    # exported_object["template"] = template_options
+    # exported_object["form"] = form_options
+    #
+    # logger.debug(json.dumps(exported_object))
 
-    template_options = dict()
-    template_options["name"] = config_template.name
-    template_options["description"] = config_template.description
-    template_options["action_provider"] = config_template.action_provider
-    template_options["action_provider_options"] = config_template.action_provider_options
-    template_options["type"] = config_template.type
-    template_options["template"] = quote(config_template.template)
+    # response = HttpResponse(json.dumps(exported_object), content_type="application/json")
 
-    form_options = dict()
-    form_options["name"] = input_form.name
-    form_options["description"] = input_form.description
-    form_options["instructions"] = input_form.instructions
-    form_options["json"] = quote(input_form.json)
-
-    exported_object = dict()
-    exported_object["template"] = template_options
-    exported_object["form"] = form_options
-
-    logger.debug(json.dumps(exported_object))
-
-    response = HttpResponse(json.dumps(exported_object), content_type="application/json")
+    response = HttpResponse(exported_json, content_type="application/json")
     response['Content-Disposition'] = 'attachment; filename=' + 'aframe-' + str(config_template.name) + '.json'
 
     return response
@@ -544,6 +573,7 @@ def apply_standalone_template(request):
             context.update(j_dict)
         else:
             logger.debug("setting context %s" % j["name"])
+            print 'setting context %s' % j['name']
             context[j["name"]] = str(request.POST[j["name"]])
 
     config_template = input_form.script
@@ -595,7 +625,26 @@ def apply_standalone_template(request):
 
     action = action_provider.get_provider_instance(action_name, action_options)
     results = action.execute_template(completed_template)
-    context = {"results": results}
+    print type(results)
+    # the action is passing back extra information about the type of response
+    if type(results) is dict:
+        if 'display_inline' in results and results['display_inline'] is False:
+            if 'cache_key' in results:
+                # set extra data on the context so we can use it to build a download link downstream
+                context = {
+                    'results': 'Binary data',
+                    'cache_key': results['cache_key'],
+                    'scheme': request.scheme,
+                    'host': request.get_host()
+                }
+        else:
+            # fixme to ensure contents is always present in results when display_inline is true
+            # results['content'] is currently unimplemented!
+            context = {'results': results['contents']}
+
+    else:
+        # results is just a string object, so send it through
+        context = {"results": results}
 
     if "inline" in request.POST and request.POST["inline"] == 'yes_please':
         print "returning INLINE"
